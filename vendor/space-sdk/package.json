@@ -1,0 +1,28 @@
+{
+  "description": "Standalone compatibility runtime for deploying this UrbanService web app outside the Muse artifact host.",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./build": {
+      "import": "./dist/build.js",
+      "types": "./dist/build.d.ts"
+    },
+    "./client": {
+      "import": "./dist/client.js",
+      "types": "./dist/client.d.ts"
+    },
+    "./styles.css": "./styles.css"
+  },
+  "files": [
+    "dist/",
+    "styles.css",
+    "package.json"
+  ],
+  "main": "./dist/index.js",
+  "name": "@hatch/space-sdk",
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "version": "0.12.0-standalone.1"
+}
