@@ -1,0 +1,8 @@
+{
+  "runtime": "typescript",
+  "platformVersion": 24,
+  "entry": "client/dist/index.html",
+  "name": "UrbanService - Urban Company Clone",
+  "slug": "urbanservice-urban-company-clone",
+  "managedCronJobs": []
+}
