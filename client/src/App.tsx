@@ -152,6 +152,7 @@ export function App() {
   const [confirmedBooking, setConfirmedBooking] = useState<Booking | null>(null);
   const [partnerId, setPartnerId] = useState<number>(1);
   const [payBooking, setPayBooking] = useState<Booking | null>(null);
+  const [collectBooking, setCollectBooking] = useState<Booking | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [auth, setAuth] = useState<AuthUser | null>(() => loadAuth());
   const [profile, setProfile] = useState<{ name: string; phone: string } | null>(() => {
@@ -256,7 +257,9 @@ export function App() {
   const acceptMut = useMutation({ mutationFn: (input: { bookingId: number; providerId: number }) => api.acceptJob(input), onSuccess: (r) => { say(r.success ? "Job accepted — share the OTP when you arrive" : (r.error ?? "Accept failed")); invalidate(); } });
   const rejectMut = useMutation({ mutationFn: (input: { bookingId: number; providerId: number }) => api.rejectJob(input), onSuccess: (r) => { say(r.success ? "Job rejected" : (r.error ?? "Reject failed")); invalidate(); } });
   const startMut = useMutation({ mutationFn: (input: { bookingId: number; providerId: number; otp: string }) => api.startJob(input), onSuccess: (r) => { say(r.success ? "Work started" : (r.error ?? "Start failed — check the OTP")); invalidate(); } });
-  const completeMut = useMutation({ mutationFn: (input: { bookingId: number; providerId: number }) => api.completeJob(input), onSuccess: (r) => { say(r.success ? "Visit completed" : (r.error ?? "Complete failed")); invalidate(); } });
+  const completeMut = useMutation({ mutationFn: (input: { bookingId: number; providerId: number }) => api.completeJob(input), onSuccess: (r) => { if (!r.success || !r.booking) { say(r.error ?? "Complete failed"); return; } if (r.booking.paymentStatus === "PAID") { say("Visit completed — payment was already collected online"); } else { say("Visit completed — collect the payment now"); setCollectBooking(r.booking); } invalidate(); } });
+  const recordCollectionMut = useMutation({ mutationFn: (input: { bookingId: number; providerId: number; method: "QR" | "CASH" }) => api.recordCollection(input), onSuccess: (r) => { if (!r.success) { say(r.error ?? "Could not record collection"); return; } setCollectBooking(null); say(r.due ? `${r.due.collectionMethod === "CASH" ? "Cash collected" : "QR payment recorded"} — pay ${inr(r.due.commissionAmount)} commission (10%) within 24 hours` : "Collection recorded"); invalidate(); } });
+  const payCommissionMut = useMutation({ mutationFn: (input: { bookingId: number; providerId: number }) => api.payCommission(input), onSuccess: (r) => { say(r.success ? "Commission submitted to UrbanService — thank you" : (r.error ?? "Commission payment failed")); invalidate(); } });
   const availMut = useMutation({ mutationFn: (input: { providerId: number; available: boolean }) => api.setProviderAvailability(input), onSuccess: (r) => { say(r.success ? (r.isAvailable ? "You are now available for jobs" : "You are paused — no new jobs") : "Update failed"); invalidate(); } });
   const resetMut = useMutation({ mutationFn: () => api.resetData({}), onSuccess: () => { say("Catalogue reset to the original services & professionals"); invalidate(); } });
   const kycMut = useMutation({ mutationFn: (input: { providerId: number; status: "approved" | "rejected" | "pending"; reason?: string }) => api.updateKycStatus(input), onSuccess: (r) => { say(r.success ? "KYC status updated" : (r.error ?? "KYC update failed")); invalidate(); } });
@@ -521,10 +524,20 @@ export function App() {
             onReject={(id) => rejectMut.mutate({ bookingId: id, providerId: effectivePartnerId })}
             onStart={(id, otp) => startMut.mutate({ bookingId: id, providerId: effectivePartnerId, otp })}
             onComplete={(id) => completeMut.mutate({ bookingId: id, providerId: effectivePartnerId })}
+            onCollect={(b) => setCollectBooking(b)}
+            onPayCommission={(bookingId) => payCommissionMut.mutate({ bookingId, providerId: effectivePartnerId })}
+            payCommissionBusy={payCommissionMut.isPending}
             onAvail={(a) => availMut.mutate({ providerId: effectivePartnerId, available: a })}
             onJoinAsProvider={() => setView("register")}
             onSignIn={() => setView("login")}
           />
+        )}
+
+        {collectBooking && (
+          <CollectionScreen b={collectBooking} busy={recordCollectionMut.isPending}
+            onQr={() => recordCollectionMut.mutate({ bookingId: collectBooking.id, providerId: effectivePartnerId, method: "QR" })}
+            onCash={() => recordCollectionMut.mutate({ bookingId: collectBooking.id, providerId: effectivePartnerId, method: "CASH" })}
+            onClose={() => setCollectBooking(null)} />
         )}
 
         {view === "pay" && payBooking && (
@@ -860,14 +873,16 @@ function BookingCard({ b, slots, onCancel, onRate, onReschedule, onPay }: {
   );
 }
 
-function PartnerPortal({ partnerId, setPartnerId, lockedProviderId, authRole, selectorProviders, services, dash, loading, say, invalidate, onAccept, onReject, onStart, onComplete, onAvail, onJoinAsProvider, onSignIn }: {
+function PartnerPortal({ partnerId, setPartnerId, lockedProviderId, authRole, selectorProviders, services, dash, loading, say, invalidate, onAccept, onReject, onStart, onComplete, onCollect, onPayCommission, payCommissionBusy, onAvail, onJoinAsProvider, onSignIn }: {
   partnerId: number; setPartnerId: (n: number) => void;
   lockedProviderId: number | null; authRole: string | null;
   selectorProviders: AdminProvider[]; services: Service[];
   dash: Dashboard | undefined; loading: boolean;
   say: (m: string) => void; invalidate: () => void;
   onAccept: (id: number) => void; onReject: (id: number) => void;
-  onStart: (id: number, otp: string) => void; onComplete: (id: number) => void; onAvail: (a: boolean) => void;
+  onStart: (id: number, otp: string) => void; onComplete: (id: number) => void;
+  onCollect: (b: Booking) => void; onPayCommission: (bookingId: number) => void; payCommissionBusy: boolean;
+  onAvail: (a: boolean) => void;
   onJoinAsProvider: () => void; onSignIn: () => void;
 }) {
   const [otpMap, setOtpMap] = useState<Record<number, string>>({});
@@ -876,6 +891,7 @@ function PartnerPortal({ partnerId, setPartnerId, lockedProviderId, authRole, se
   const jobs: Booking[] = dash?.jobs ?? [];
   const pool: Booking[] = dash?.pool ?? [];
   const earn = dash?.earnings;
+  const commission = dash?.commission;
   const isLocked = lockedProviderId != null;
 
   return (
@@ -935,6 +951,34 @@ function PartnerPortal({ partnerId, setPartnerId, lockedProviderId, authRole, se
                 <AnalyticsCard value={String(earn.pendingJobs)} label="Pending bookings" sub="Assigned + open pool" />
                 <AnalyticsCard value={`★ ${earn.rating.toFixed(1)}`} label="My rating" sub={`${prov.totalReviews} reviews`} />
               </div>
+              {commission && (commission.totalDue > 0 || commission.dues.length > 0) && (
+                <div className={`mt-4 rounded-3xl border p-5 ${commission.blocked ? "border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/30" : "border-[var(--border)] bg-[var(--surface)]"}`} role={commission.blocked ? "alert" : undefined}>
+                  <h3 className="font-extrabold">Platform commission ({commission.percent}%)</h3>
+                  {commission.blocked ? (
+                    <p className="mt-1 text-sm text-[var(--danger)]"><strong>New jobs are paused.</strong> You have overdue commission of {inr(commission.overdueAmount)}. Pay it to UrbanService to start getting jobs again.</p>
+                  ) : commission.totalDue > 0 ? (
+                    <p className="mt-1 text-sm text-[var(--dim)]">You collected job payments directly (cash / your QR). Submit {inr(commission.totalDue)} commission to UrbanService — each amount is due within 24 hours of completing that job.</p>
+                  ) : (
+                    <p className="mt-1 text-sm text-[var(--dim)]">All commission is settled. Thank you!</p>
+                  )}
+                  {commission.totalDue > 0 && (
+                    <div className="mt-3 flex flex-wrap items-center gap-4">
+                      <img src={`https://api.qrserver.com/v1/create-qr-code/?size=120x120&margin=8&data=${encodeURIComponent(`upi://pay?pa=${commission.platformUpiId}&pn=UrbanService&am=${commission.totalDue}&cu=INR&tn=${encodeURIComponent("UrbanService commission")}`)}`} alt="UrbanService commission payment QR" className="h-[120px] w-[120px] rounded-xl border border-[var(--border)] bg-white p-1" />
+                      <p className="text-[13px] text-[var(--dim)]">Pay to <strong className="text-[var(--text)]">{commission.platformUpiId}</strong> (demo UPI).<br />Then tap “I’ve paid” on the job below.</p>
+                    </div>
+                  )}
+                  <ul className="mt-3 divide-y divide-[var(--border)]">
+                    {commission.dues.slice(0, 8).map((d) => (
+                      <li key={d.id} className="flex flex-wrap items-center gap-2 py-2 text-[13px]">
+                        <span className="font-bold">#{d.bookingId} {d.serviceName}</span>
+                        <span className="text-[var(--dim)]">{d.customerName} · collected {inr(d.amount)} via {d.collectionMethod}</span>
+                        <span className={d.status === "PAID" ? "font-bold text-emerald-600" : d.overdue ? "font-bold text-[var(--danger)]" : "font-bold"}>{d.status === "PAID" ? `✓ Paid ${inr(d.commissionAmount)}` : `${inr(d.commissionAmount)} due by ${fmtWhen(d.dueAt)}${d.overdue ? " · OVERDUE" : ""}`}</span>
+                        {d.status === "DUE" && <button type="button" aria-label={`Pay commission for booking ${d.bookingId}`} disabled={payCommissionBusy} onClick={() => onPayCommission(d.bookingId)} className="ml-auto rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50">I’ve paid — submit</button>}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <div className="mt-4 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-5">
                 <h3 className="font-extrabold">Monthly revenue — last 6 months</h3>
                 <p className="mt-0.5 text-[13px] text-[var(--dim)]">From completed jobs. Visiting fee included in each booking total.</p>
@@ -997,6 +1041,15 @@ function PartnerPortal({ partnerId, setPartnerId, lockedProviderId, authRole, se
                         </div>
                       )}
                       {j.status === "IN_PROGRESS" && <button type="button" aria-label={`Complete job ${j.id}`} onClick={() => onComplete(j.id)} className="mt-3 rounded-lg bg-[var(--accent)] px-4 py-2 text-[13px] font-bold text-white">Complete visit</button>}
+                      {j.status === "COMPLETED" && j.commission && (
+                        <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px]">
+                          <span className={j.commission.status === "PAID" ? "font-bold text-emerald-600" : j.commission.overdue ? "font-bold text-[var(--danger)]" : "font-bold"}>
+                            {j.commission.status === "PAID" ? `✓ Commission paid (${inr(j.commission.commissionAmount)})` : `Commission ${inr(j.commission.commissionAmount)} (10%) · due by ${fmtWhen(j.commission.dueAt)}${j.commission.overdue ? " · OVERDUE — new jobs paused" : ""}`}
+                          </span>
+                          {j.commission.collectionMethod === "UNCONFIRMED" && j.paymentStatus !== "PAID" && <button type="button" aria-label={`Collect payment for job ${j.id}`} onClick={() => onCollect(j)} className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-bold text-white">Collect payment / show QR</button>}
+                          {j.commission.status === "DUE" && <button type="button" aria-label={`Pay commission for job ${j.id}`} disabled={payCommissionBusy} onClick={() => onPayCommission(j.id)} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-bold disabled:opacity-50">Pay commission</button>}
+                        </div>
+                      )}
                     </article>
                   ))}
                 </div>
@@ -1011,8 +1064,9 @@ function PartnerPortal({ partnerId, setPartnerId, lockedProviderId, authRole, se
                       <div className="flex items-start justify-between gap-3"><h3 className="font-extrabold">{j.items[0]?.serviceName ?? "Service"}</h3><StatusBadge status={j.status} /></div>
                       <p className="mt-1.5 text-[13px] text-[var(--dim)]">📅 {prettyDate(j.scheduledDate)} · {j.scheduledSlot} · 📍 {j.address}</p>
                       <p className="text-[13px] text-[var(--dim)]">Worth <strong className="text-[var(--text)]">{inr(j.finalPrice)}</strong></p>
-                      <button type="button" aria-label={`Accept job ${j.id}`} onClick={() => onAccept(j.id)} className="mt-3 rounded-lg bg-[var(--accent)] px-4 py-2 text-[13px] font-bold text-white disabled:opacity-40" disabled={!prov.isAvailable}>Accept job</button>
+                      <button type="button" aria-label={`Accept job ${j.id}`} onClick={() => onAccept(j.id)} className="mt-3 rounded-lg bg-[var(--accent)] px-4 py-2 text-[13px] font-bold text-white disabled:opacity-40" disabled={!prov.isAvailable || commission?.blocked}>Accept job</button>
                       {!prov.isAvailable && <span className="ml-2 text-xs text-[var(--danger)] font-semibold">Go available first</span>}
+                      {commission?.blocked && <span className="ml-2 text-xs text-[var(--danger)] font-semibold">Paused — pay overdue commission ({inr(commission.overdueAmount)}) to get jobs</span>}
                     </article>
                   ))}
                 </div>
@@ -1164,6 +1218,34 @@ function ProviderProfileEditor({ prov, services, say, invalidate, onAvail }: { p
           <button type="button" aria-label={prov.isAvailable ? "Pause availability from profile" : "Go available from profile"} onClick={() => onAvail(!prov.isAvailable)} className="rounded-xl border border-[var(--border)] px-5 py-2.5 text-sm font-bold">{prov.isAvailable ? "Pause new jobs" : "Go available"}</button>
         </div>
         <p className="text-[13px] text-[var(--dim)]">Rating <strong className="text-[var(--text)]">★ {prov.rating.toFixed(1)}</strong> from {prov.totalReviews} reviews · Account <strong className="text-[var(--text)]">{prov.accountStatus}</strong> · KYC <strong className="text-[var(--text)]">{prov.kycStatus}</strong></p>
+      </div>
+    </div>
+  );
+}
+
+function CollectionScreen({ b, onQr, onCash, onClose, busy }: {
+  b: Booking; onQr: () => void; onCash: () => void; onClose: () => void; busy: boolean;
+}) {
+  const providerUpi = b.providerPhone ? `${b.providerPhone}@upi` : "urbanservice@okaxis";
+  const commissionAmount = b.commission?.commissionAmount ?? Math.round(b.finalPrice * 10) / 100;
+  const upiUri = `upi://pay?pa=${providerUpi}&pn=${encodeURIComponent(b.providerName ?? "UrbanService Pro")}&am=${b.finalPrice}&cu=INR&tn=${encodeURIComponent(`UrbanService booking #${b.id}`)}`;
+  const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=10&data=${encodeURIComponent(upiUri)}`;
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="collect-heading">
+      <button type="button" aria-label="Close payment collection" onClick={onClose} className="absolute inset-0 bg-black/50" />
+      <div className="relative w-full sm:max-w-md max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl bg-[var(--surface)] p-5 shadow-2xl">
+        <h2 id="collect-heading" className="text-xl font-extrabold tracking-tight">Collect payment</h2>
+        <p className="mt-1 text-sm text-[var(--dim)]">Job #{b.id} is complete. Ask {b.customerName} to scan your QR and pay <strong className="text-[var(--text)]">{inr(b.finalPrice)}</strong>.</p>
+        <div className="mt-4 flex flex-col items-center rounded-2xl border border-[var(--border)] bg-white p-4">
+          <img src={qrSrc} alt={`Payment QR for ${inr(b.finalPrice)}`} className="h-[240px] w-[240px]" />
+          <p className="mt-2 text-center text-[13px] text-zinc-600">UPI: <strong>{providerUpi}</strong> · {b.providerName ?? "Professional"}<br />{inr(b.finalPrice)} · Booking #{b.id}</p>
+        </div>
+        <p className="mt-3 rounded-xl bg-[var(--accent-soft)] px-3.5 py-2.5 text-[13px]">Platform commission is <strong>10% ({inr(commissionAmount)})</strong>. If you collect cash or payment on your own QR, submit this commission to UrbanService <strong>within 24 hours</strong>{b.commission ? ` (by ${fmtWhen(b.commission.dueAt)})` : ""}. If it stays unpaid after that, new jobs pause until you pay it.</p>
+        <div className="mt-4 grid gap-2.5">
+          <button type="button" aria-label="Payment received on QR" disabled={busy} onClick={onQr} className="w-full rounded-xl bg-emerald-600 py-3 text-sm font-bold text-white disabled:opacity-50">Payment received on QR</button>
+          <button type="button" aria-label="Cash collected skip QR" disabled={busy} onClick={onCash} className="w-full rounded-xl bg-[var(--accent)] py-3 text-sm font-bold text-white disabled:opacity-50">Cash collected — skip QR</button>
+          <button type="button" aria-label="Collect payment later" disabled={busy} onClick={onClose} className="w-full rounded-xl border border-[var(--border)] py-3 text-sm font-bold disabled:opacity-50">I’ll collect later</button>
+        </div>
       </div>
     </div>
   );
@@ -1998,7 +2080,7 @@ function AdminView({ overview, overviewLoading, providers, providersLoading, boo
 
   const filteredBookings = bookings.filter((b) => bStatus === "all" || b.status === bStatus);
   const filteredCustomers = customers.filter((c) => cQuery.trim() === "" || c.name.toLowerCase().includes(cQuery.trim().toLowerCase()) || c.phone.includes(cQuery.trim()));
-  const commission = settings?.commissionPercent ?? 20;
+  const commission = settings?.commissionPercent ?? 10;
   const grossRevenue = stats?.totalRevenue ?? 0;
 
   const tabs: [AdminTab, string][] = [["overview", "Overview"], ["kyc", `KYC Verification (${pendingKycProviders.length})`], ["providers", "Providers"], ["bookings", "Bookings"], ["customers", "Customers"], ["revenue", "Revenue"], ["settings", "Settings"]];
@@ -2252,7 +2334,7 @@ function AdminView({ overview, overviewLoading, providers, providersLoading, boo
 
 function AdminSettings({ settings, services, say, invalidate }: { settings: Settings | undefined; services: Service[]; say: (m: string) => void; invalidate: () => void }) {
   const [visitingFee, setVisitingFee] = useState<string>(String(settings?.visitingFee ?? 49));
-  const [commission, setCommission] = useState<string>(String(settings?.commissionPercent ?? 20));
+  const [commission, setCommission] = useState<string>(String(settings?.commissionPercent ?? 10));
   const [supportEmail, setSupportEmail] = useState(settings?.supportEmail ?? "support@urbanservice.in");
   const [supportPhone, setSupportPhone] = useState(settings?.supportPhone ?? "+91 90000 00001");
   const [maintenance, setMaintenance] = useState<boolean>(settings?.maintenanceMode ?? false);
