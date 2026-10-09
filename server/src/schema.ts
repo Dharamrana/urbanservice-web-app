@@ -86,3 +86,21 @@ export const bookingItems = sqliteTable("booking_items", {
   unitPrice: real("unit_price").notNull(),
   quantity: integer("quantity").notNull(),
 });
+
+// Platform commission owed by a provider who collected a completed job's
+// amount directly (cash or the provider's own UPI QR). One row per booking.
+// status: DUE | PAID. collectionMethod: UNCONFIRMED | QR | CASH | ONLINE.
+export const commissionDues = sqliteTable("commission_dues", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  bookingId: integer("booking_id").notNull().unique(),
+  providerId: integer("provider_id").notNull(),
+  amount: real("amount").notNull(),
+  commissionPercent: real("commission_percent").notNull().default(10),
+  commissionAmount: real("commission_amount").notNull(),
+  collectionMethod: text("collection_method").notNull().default("UNCONFIRMED"),
+  status: text("status").notNull().default("DUE"),
+  dueAt: integer("due_at", { mode: "timestamp_ms" }).notNull(),
+  paidAt: integer("paid_at", { mode: "timestamp_ms" }),
+  paymentRef: text("payment_ref"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});

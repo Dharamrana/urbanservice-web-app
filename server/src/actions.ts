@@ -3,7 +3,13 @@ import { asc, desc, eq } from "drizzle-orm";
 import * as schema from "./schema";
 
 const VISITING_FEE = 49;
-const DEFAULT_COMMISSION_PERCENT = 20;
+const DEFAULT_COMMISSION_PERCENT = 10;
+// Commission a provider owes the platform when they collect a completed
+// job's amount directly (cash or their own UPI QR): 10% of the job amount,
+// payable within 24 hours of completion. Overdue dues pause new jobs.
+const PROVIDER_COMMISSION_PERCENT = 10;
+const COMMISSION_DUE_MS = 24 * 60 * 60 * 1000;
+const PLATFORM_UPI_ID = "urbanservice@okaxis";
 const ADMIN_INVITE_CODE = "ADMIN2026";
 const DAILY_SLOTS = ["08:00-10:00","10:00-12:00","12:00-14:00","14:00-16:00","16:00-18:00","18:00-20:00"] as const;
 const STATUSES = ["PENDING","ASSIGNED","IN_PROGRESS","COMPLETED","CANCELLED","REJECTED"] as const;
@@ -194,16 +200,90 @@ async function getSettingsMap(ctx: Ctx): Promise<Record<string, string>> {
   return out;
 }
 
+function toISO(d: Date | number | null | undefined): string | null {
+  if (d == null) return null;
+  return (d instanceof Date ? d : new Date(d as unknown as number)).toISOString();
+}
+
+type CommissionDueRow = typeof schema.commissionDues.$inferSelect;
+
+function expandDue(r: CommissionDueRow) {
+  return {
+    id: r.id, bookingId: r.bookingId, providerId: r.providerId,
+    amount: r.amount, commissionPercent: r.commissionPercent, commissionAmount: r.commissionAmount,
+    collectionMethod: r.collectionMethod, status: r.status,
+    dueAt: toISO(r.dueAt) ?? new Date().toISOString(), paidAt: toISO(r.paidAt), paymentRef: r.paymentRef,
+    overdue: r.status === "DUE" && (r.dueAt instanceof Date ? r.dueAt : new Date(r.dueAt as unknown as number)).getTime() < Date.now(),
+  };
+}
+type CommissionDueOut = ReturnType<typeof expandDue>;
+
+async function ensureCommissionDue(ctx: Ctx, b: typeof schema.bookings.$inferSelect): Promise<CommissionDueOut | null> {
+  if (b.providerId == null || b.status !== "COMPLETED") return null;
+  const db = ctx.db<typeof schema>();
+  const [existing] = await db.select().from(schema.commissionDues).where(eq(schema.commissionDues.bookingId, b.id)).limit(1);
+  if (existing) return expandDue(existing);
+  const completedAt = b.completedAt instanceof Date ? b.completedAt : b.completedAt ? new Date(b.completedAt as unknown as number) : new Date();
+  const paidOnline = b.paymentStatus === "PAID";
+  const commissionAmount = Math.round(b.finalPrice * PROVIDER_COMMISSION_PERCENT) / 100;
+  const [row] = await db.insert(schema.commissionDues).values({
+    bookingId: b.id, providerId: b.providerId, amount: b.finalPrice,
+    commissionPercent: PROVIDER_COMMISSION_PERCENT, commissionAmount,
+    collectionMethod: paidOnline ? "ONLINE" : "UNCONFIRMED",
+    status: paidOnline ? "PAID" : "DUE",
+    dueAt: new Date(completedAt.getTime() + COMMISSION_DUE_MS),
+    paidAt: paidOnline ? completedAt : null,
+    paymentRef: paidOnline ? (b.paymentRef ?? "ONLINE") : null,
+  }).returning();
+  return row ? expandDue(row) : null;
+}
+
+async function getCommissionState(ctx: Ctx, providerId: number) {
+  const db = ctx.db<typeof schema>();
+  const rows = await db.select().from(schema.commissionDues).where(eq(schema.commissionDues.providerId, providerId)).orderBy(desc(schema.commissionDues.createdAt));
+  const dues: (CommissionDueOut & { customerName: string; serviceName: string })[] = [];
+  for (const r of rows) {
+    const [b] = await db.select().from(schema.bookings).where(eq(schema.bookings.id, r.bookingId)).limit(1);
+    const items = b ? await db.select().from(schema.bookingItems).where(eq(schema.bookingItems.bookingId, b.id)).limit(1) : [];
+    dues.push({ ...expandDue(r), customerName: b?.customerName ?? "Customer", serviceName: items[0]?.serviceName ?? "Service" });
+  }
+  const open = dues.filter((d) => d.status === "DUE");
+  const overdue = open.filter((d) => d.overdue);
+  return {
+    percent: PROVIDER_COMMISSION_PERCENT,
+    platformUpiId: PLATFORM_UPI_ID,
+    totalDue: Math.round(open.reduce((n, d) => n + d.commissionAmount, 0) * 100) / 100,
+    overdueAmount: Math.round(overdue.reduce((n, d) => n + d.commissionAmount, 0) * 100) / 100,
+    blocked: overdue.length > 0,
+    dues,
+  };
+}
+
+async function blockedProviderIds(ctx: Ctx): Promise<Set<number>> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db.select().from(schema.commissionDues).where(eq(schema.commissionDues.status, "DUE"));
+  const now = Date.now();
+  const out = new Set<number>();
+  for (const r of rows) {
+    const dueMs = (r.dueAt instanceof Date ? r.dueAt : new Date(r.dueAt as unknown as number)).getTime();
+    if (dueMs < now) out.add(r.providerId);
+  }
+  return out;
+}
+
 async function expandBooking(ctx: Ctx, b: typeof schema.bookings.$inferSelect) {
   const db = ctx.db<typeof schema>();
   const items = await db.select().from(schema.bookingItems).where(eq(schema.bookingItems.bookingId, b.id)).orderBy(asc(schema.bookingItems.id));
   let providerName: string | null = null;
+  let providerPhone: string | null = null;
   if (b.providerId != null) {
     const [p] = await db.select().from(schema.providers).where(eq(schema.providers.id, b.providerId)).limit(1);
     providerName = p?.name ?? null;
+    providerPhone = p?.phone ?? null;
   }
+  const [dueRow] = await db.select().from(schema.commissionDues).where(eq(schema.commissionDues.bookingId, b.id)).limit(1);
   return {
-    id: b.id, serviceId: b.serviceId, providerId: b.providerId, providerName,
+    id: b.id, serviceId: b.serviceId, providerId: b.providerId, providerName, providerPhone,
     status: b.status, description: b.description, address: b.address,
     customerName: b.customerName, customerPhone: b.customerPhone,
     scheduledDate: b.scheduledDate, scheduledSlot: b.scheduledSlot,
@@ -212,17 +292,32 @@ async function expandBooking(ctx: Ctx, b: typeof schema.bookings.$inferSelect) {
     startOtp: b.startOtp, otpVerified: b.otpVerified, rating: b.rating, review: b.review,
     requestedAt: (b.requestedAt instanceof Date ? b.requestedAt : new Date(b.requestedAt as unknown as number)).toISOString(),
     completedAt: b.completedAt ? (b.completedAt instanceof Date ? b.completedAt : new Date(b.completedAt as unknown as number)).toISOString() : null,
+    commission: dueRow ? expandDue(dueRow) : null,
     items: items.map((i) => ({ id: i.id, serviceId: i.serviceId, serviceName: i.serviceName, unitPrice: i.unitPrice, quantity: i.quantity, lineTotal: i.unitPrice * i.quantity })),
   };
 }
 type BookingOut = Awaited<ReturnType<typeof expandBooking>>;
 
+const commissionDueSchema = z.object({
+  id: z.number(), bookingId: z.number(), providerId: z.number(),
+  amount: z.number(), commissionPercent: z.number(), commissionAmount: z.number(),
+  collectionMethod: z.string(), status: z.string(),
+  dueAt: z.string(), paidAt: z.string().nullable(), paymentRef: z.string().nullable(),
+  overdue: z.boolean(),
+});
+const commissionStateSchema = z.object({
+  percent: z.number(), platformUpiId: z.string(),
+  totalDue: z.number(), overdueAmount: z.number(), blocked: z.boolean(),
+  dues: z.array(commissionDueSchema.extend({ customerName: z.string(), serviceName: z.string() })),
+});
+
 const bookingSchema = z.object({
-  id: z.number(), serviceId: z.number(), providerId: z.number().nullable(), providerName: z.string().nullable(),
+  id: z.number(), serviceId: z.number(), providerId: z.number().nullable(), providerName: z.string().nullable(), providerPhone: z.string().nullable(),
   status: z.string(), description: z.string(), address: z.string(), customerName: z.string(), customerPhone: z.string(),
   scheduledDate: z.string(), scheduledSlot: z.string(), paymentMethod: z.string(), paymentStatus: z.string(), paymentRef: z.string().nullable(),
   visitingFee: z.number(), finalPrice: z.number(), startOtp: z.string().nullable(), otpVerified: z.boolean(),
   rating: z.number().nullable(), review: z.string().nullable(), requestedAt: z.string(), completedAt: z.string().nullable(),
+  commission: commissionDueSchema.nullable(),
   items: z.array(z.object({ id: z.number(), serviceId: z.number(), serviceName: z.string(), unitPrice: z.number(), quantity: z.number(), lineTotal: z.number() })),
 });
 
@@ -308,8 +403,11 @@ const dashboardResponse = z.object({
     monthlySeries: z.array(z.object({ month: z.string(), revenue: z.number(), bookings: z.number() })),
     history: z.array(bookingSchema),
   }).optional(),
+  commission: commissionStateSchema.optional(),
 });
 const payInitResponse = z.object({ success: z.boolean(), error: z.string().nullable(), mode: z.string().optional(), message: z.string().optional(), ref: z.string().optional(), amount: z.number().optional() });
+const completeJobResponse = z.object({ success: z.boolean(), error: z.string().nullable(), booking: bookingSchema.optional(), commission: commissionDueSchema.nullable().optional() });
+const commissionActionResponse = z.object({ success: z.boolean(), error: z.string().nullable(), commission: commissionStateSchema.optional(), due: commissionDueSchema.nullable().optional() });
 
 export const Actions = {
   getCatalog: defineAction({
@@ -333,7 +431,9 @@ export const Actions = {
       const db = ctx.db<typeof schema>();
       let rows = await db.select().from(schema.providers);
       // Customer-facing marketplace: only KYC-approved, active professionals are bookable/discoverable.
-      rows = rows.filter((p) => p.accountStatus === "active" && p.kycStatus === "approved");
+      // Providers with overdue (>24h) platform commission dues are paused from new jobs.
+      const blocked = await blockedProviderIds(ctx);
+      rows = rows.filter((p) => p.accountStatus === "active" && p.kycStatus === "approved" && !blocked.has(p.id));
       if (args.serviceId != null) {
         rows = rows.filter((p) => parseJsonArr<number>(p.serviceIds).includes(args.serviceId!));
       }
@@ -400,6 +500,7 @@ export const Actions = {
         if (p.accountStatus !== "active") return { success: false, error: "Selected provider is not active on the platform" };
         if (p.kycStatus !== "approved") return { success: false, error: "Selected provider is not KYC-verified yet" };
         if (!p.isAvailable) return { success: false, error: "Selected provider is currently unavailable" };
+        if ((await blockedProviderIds(ctx)).has(p.id)) return { success: false, error: "Selected provider is currently unavailable" };
         provider = p;
       }
       const schedDate = args.scheduledDate && args.scheduledDate.length > 0 ? args.scheduledDate : tomorrowIST();
@@ -544,6 +645,11 @@ export const Actions = {
       if (!b) return { success: false, error: "Booking not found" };
       if (!b.paymentRef || b.paymentRef !== args.ref) return { success: false, error: "Unknown or expired payment reference" };
       await db.update(schema.bookings).set({ paymentStatus: args.success ? "PAID" : "FAILED" }).where(eq(schema.bookings.id, b.id));
+      if (args.success) {
+        // Paid through the platform: commission is settled from platform-held
+        // funds, so no cash/QR commission due remains for the provider.
+        await db.update(schema.commissionDues).set({ status: "PAID", collectionMethod: "ONLINE", paidAt: new Date(), paymentRef: args.ref }).where(eq(schema.commissionDues.bookingId, b.id));
+      }
       const [nb] = await db.select().from(schema.bookings).where(eq(schema.bookings.id, args.bookingId)).limit(1);
       ctx.invalidateQueries();
       return ok({ booking: await expandBooking(ctx, nb!) });
@@ -560,9 +666,11 @@ export const Actions = {
       if (!p) return { success: false, error: "Professional account not found" };
       const jobRows = await db.select().from(schema.bookings).where(eq(schema.bookings.providerId, p.id)).orderBy(desc(schema.bookings.requestedAt));
       const myServices = parseJsonArr<number>(p.serviceIds);
+      const commission = await getCommissionState(ctx, p.id);
       const pending = await db.select().from(schema.bookings).where(eq(schema.bookings.status, "PENDING")).orderBy(asc(schema.bookings.scheduledDate));
       const pool: BookingOut[] = [];
       for (const r of pending) {
+        if (commission.blocked) break;
         const items = await db.select().from(schema.bookingItems).where(eq(schema.bookingItems.bookingId, r.id));
         const hitsService = myServices.includes(r.serviceId) || items.some((i) => myServices.includes(i.serviceId));
         if (hitsService) pool.push(await expandBooking(ctx, r));
@@ -611,6 +719,7 @@ export const Actions = {
           rating: Math.round(p.rating * 10) / 10,
           monthlySeries: [...monthlyMap.values()], history,
         },
+        commission,
       });
     },
   }),
@@ -625,6 +734,8 @@ export const Actions = {
       if (p.accountStatus !== "active") return { success: false, error: "Your account is not active. Contact support." };
       if (p.kycStatus !== "approved") return { success: false, error: "Complete KYC verification before accepting jobs" };
       if (!p.isAvailable) return { success: false, error: "Mark yourself available before accepting jobs" };
+      const commission = await getCommissionState(ctx, p.id);
+      if (commission.blocked) return { success: false, error: `New jobs are paused: you have overdue platform commission of ₹${Math.round(commission.overdueAmount)} (10% of cash/QR collections, payable within 24 hours). Pay it from your dashboard to resume jobs.` };
       const [b] = await db.select().from(schema.bookings).where(eq(schema.bookings.id, args.bookingId)).limit(1);
       if (!b) return { success: false, error: "Booking not found" };
       if (b.status !== "PENDING" || b.providerId != null) return { success: false, error: "Job is no longer open" };
@@ -673,8 +784,8 @@ export const Actions = {
 
   completeJob: defineAction({
     request: z.object({ bookingId: z.number().int().positive(), providerId: z.number().int().positive() }),
-    response: bookingResponse,
-    async handler(ctx, args): Promise<z.infer<typeof bookingResponse>> {
+    response: completeJobResponse,
+    async handler(ctx, args): Promise<z.infer<typeof completeJobResponse>> {
       const db = ctx.db<typeof schema>();
       const [b] = await db.select().from(schema.bookings).where(eq(schema.bookings.id, args.bookingId)).limit(1);
       if (!b) return { success: false, error: "Booking not found" };
@@ -683,8 +794,59 @@ export const Actions = {
       if (!allowed.includes("COMPLETED")) return { success: false, error: `Cannot move booking from ${b.status} to COMPLETED` };
       await db.update(schema.bookings).set({ status: "COMPLETED", completedAt: new Date() }).where(eq(schema.bookings.id, args.bookingId));
       const [nb] = await db.select().from(schema.bookings).where(eq(schema.bookings.id, args.bookingId)).limit(1);
+      // Completing a job starts the collection step: the provider shows their
+      // payment QR (or confirms cash), and owes 10% commission within 24h.
+      const commission = nb ? await ensureCommissionDue(ctx, nb) : null;
       ctx.invalidateQueries();
-      return ok({ booking: await expandBooking(ctx, nb!) });
+      return ok({ booking: await expandBooking(ctx, nb!), commission });
+    },
+  }),
+
+  recordCollection: defineAction({
+    request: z.object({ bookingId: z.number().int().positive(), providerId: z.number().int().positive(), method: z.enum(["QR", "CASH"]) }),
+    response: commissionActionResponse,
+    async handler(ctx, args): Promise<z.infer<typeof commissionActionResponse>> {
+      const db = ctx.db<typeof schema>();
+      const [b] = await db.select().from(schema.bookings).where(eq(schema.bookings.id, args.bookingId)).limit(1);
+      if (!b) return { success: false, error: "Booking not found" };
+      if (b.providerId !== args.providerId) return { success: false, error: "Not your job" };
+      if (b.status !== "COMPLETED") return { success: false, error: "Only completed jobs can record collection" };
+      let due = await ensureCommissionDue(ctx, b);
+      if (!due) return { success: false, error: "Could not create commission record" };
+      if (due.status === "DUE") {
+        await db.update(schema.commissionDues).set({ collectionMethod: args.method }).where(eq(schema.commissionDues.bookingId, b.id));
+        const [row] = await db.select().from(schema.commissionDues).where(eq(schema.commissionDues.bookingId, b.id)).limit(1);
+        if (row) due = expandDue(row);
+      }
+      ctx.invalidateQueries();
+      return ok({ commission: await getCommissionState(ctx, args.providerId), due });
+    },
+  }),
+
+  payCommission: defineAction({
+    request: z.object({ bookingId: z.number().int().positive(), providerId: z.number().int().positive() }),
+    response: commissionActionResponse,
+    async handler(ctx, args): Promise<z.infer<typeof commissionActionResponse>> {
+      const db = ctx.db<typeof schema>();
+      const [dueRow] = await db.select().from(schema.commissionDues).where(eq(schema.commissionDues.bookingId, args.bookingId)).limit(1);
+      if (!dueRow) return { success: false, error: "No commission due for this booking" };
+      if (dueRow.providerId !== args.providerId) return { success: false, error: "Not your commission record" };
+      if (dueRow.status === "PAID") return ok({ commission: await getCommissionState(ctx, args.providerId), due: expandDue(dueRow) });
+      // Mock platform collection (same pattern as the mock customer gateway):
+      // a live Razorpay/UPI collect replaces this one update.
+      const ref = `COMM-${Date.now()}-${dueRow.id}`;
+      await db.update(schema.commissionDues).set({ status: "PAID", paidAt: new Date(), paymentRef: ref }).where(eq(schema.commissionDues.id, dueRow.id));
+      const [row] = await db.select().from(schema.commissionDues).where(eq(schema.commissionDues.id, dueRow.id)).limit(1);
+      ctx.invalidateQueries();
+      return ok({ commission: await getCommissionState(ctx, args.providerId), due: row ? expandDue(row) : null });
+    },
+  }),
+
+  getCommissionDues: defineAction({
+    request: z.object({ providerId: z.number().int().positive() }),
+    response: commissionActionResponse,
+    async handler(ctx, args): Promise<z.infer<typeof commissionActionResponse>> {
+      return ok({ commission: await getCommissionState(ctx, args.providerId), due: null });
     },
   }),
 
@@ -706,6 +868,7 @@ export const Actions = {
     response: errOnly,
     async handler(ctx) {
       const db = ctx.db<typeof schema>();
+      await db.delete(schema.commissionDues);
       await db.delete(schema.bookingItems);
       await db.delete(schema.bookings);
       await db.delete(schema.providers);
