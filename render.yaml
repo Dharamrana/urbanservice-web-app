@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: urbanservice-web-app
+    runtime: docker
+    repo: https://github.com/Dharamrana/urbanservice-web-app
+    branch: main
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_PATH
+        value: /tmp/urbanservice.db

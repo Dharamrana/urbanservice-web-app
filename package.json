@@ -1,16 +1,6 @@
 {
-  "name": "hatch-ts-space-urbanservice-urban-company-clone",
-  "private": true,
-  "type": "module",
-  "packageManager": "bun@1.3.10",
-  "scripts": {
-    "typecheck": "bun x tsc --noEmit -p client/tsconfig.json && bun x tsc --noEmit -p server/tsconfig.json",
-    "build": "bun run build:server && bun run build:client",
-    "build:server": "cd server && bun build ./src/actions.ts --target=bun --outfile=./dist/actions.js",
-    "build:client": "bun ./client/build.mjs"
-  },
   "dependencies": {
-    "@hatch/space-sdk": "file:./vendor/space-sdk.tgz",
+    "@hatch/space-sdk": "file:./vendor/space-sdk",
     "@tanstack/react-query": "5.100.10",
     "drizzle-orm": "0.45.2",
     "react": "19.2.5",
@@ -22,8 +12,21 @@
     "@types/bun": "1.4.2",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "bun-plugin-tailwind": "0.0.15",
     "tailwindcss": "4.1.13",
     "tailwindcss-safe-area": "1.3.0",
     "typescript": "5.6.3"
-  }
+  },
+  "name": "urbanservice-web-app",
+  "packageManager": "bun@1.3.10",
+  "private": true,
+  "scripts": {
+    "build": "bun run build:server && bun run build:client",
+    "build:client": "bun ./client/build.mjs",
+    "build:server": "cd server && bun build ./src/actions.ts --target=bun --outfile=./dist/actions.js",
+    "start": "bun run server/standalone.ts",
+    "typecheck": "bun x tsc --noEmit -p client/tsconfig.json && bun x tsc --noEmit -p server/tsconfig.json"
+  },
+  "type": "module",
+  "version": "1.0.0"
 }
