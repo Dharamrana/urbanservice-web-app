@@ -1,6 +1,10 @@
 # UrbanService — Urban Company Clone (Web App)
 
-The exact hosted web app: complete role-based marketplace — **Customer / Service Provider / Admin** — with Rapido-style Select on Map (Dehradun: Prem Nagar, Sudhowala, Kheri Gaon), all 8 services, provider revenue analytics, admin KYC management, provider wallet, coupons & referrals.
+**🔗 Live app:** https://urbanservice-web-app.onrender.com (free tier — first load after idle can take ~30 seconds to wake)
+
+## Brief description
+
+UrbanService is a hyper-local home-services marketplace (an Urban Company clone) built for Tier-3 neighbourhoods like Prem Nagar, Sudhowala and Kheri Gaon in Dehradun. It has three roles — **Customer, Service Provider, and Admin**. Customers browse 8 services, pick a location with a Rapido-style Select-on-Map, choose a nearby professional, book a slot, and pay online or in cash. Providers manage jobs with OTP start, view revenue analytics, set their service area, and submit KYC. Admins verify provider KYC, moderate accounts, and see platform analytics. When a provider finishes a job, they collect payment via their own UPI QR (or cash) and owe the platform 10% commission within 24 hours — unpaid commission pauses their new jobs automatically.
 
 React 19 + TypeScript · Bun · Drizzle ORM (SQLite) · Tailwind CSS 4 · Recharts. Client in `client/`, server actions in `server/src/actions.ts`, schema in `server/src/schema.ts`, migrations in `drizzle/`. The standalone Render/local server is `server/standalone.ts`; see `DATA-PLAN.md` for the data model.
 
